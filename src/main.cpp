@@ -1,436 +1,116 @@
+#include <Arduino.h>
 #include <WiFi.h>
-#include <Arduino_MQTT_Client.h>
-#include <ThingsBoard.h>
-#include "DHT20.h"
-#include "Wire.h"
-#include <ESP32Servo.h>
+#include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <Adafruit_NeoPixel.h>
 
-// ========== PIN DEFINITION ==========
-#define SDA_PIN GPIO_NUM_21
-#define SCL_PIN GPIO_NUM_22
-#define TRIG_PIN 19
-#define ECHO_PIN 23
-#define SERVO_PIN 26
-#define FAN 2
-#define FAN_PWM_CHANNEL 4
+// WiFi & MQTT config
+const char *ssid = "Wokwi-GUEST";
+const char *password = "";
+const char *mqttServer = "app.coreiot.io";
+const int mqttPort = 1883;
+const char *mqttUser = "nUwypBbRbqsn2crp6u6P";
+const char *mqttPassword = "";
 
-#define PIR_PIN 27
-#define IR_PIN 32
-#define LED_PIN 33
-#define NUM_LEDS 4
+#define LED1_PIN 13
+bool ledState = false;
 
-// ========== NETWORK CONFIG ==========
-constexpr char WIFI_SSID[] = "CAO coffee";
-constexpr char WIFI_PASSWORD[] = "cao71phamvanxao";
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
 
-// === TOKENs ===
-constexpr char TOKEN_SENSOR[] = "knvzbj9qjf96dj9wwagm";
-constexpr char TOKEN_FAN[] = "GLVo2PmoGVVVXlOJmtA7";
-constexpr char TOKEN_IR[] = "WWYxxKoA4nwXNKukq7l3";
-constexpr char TOKEN_PIR[] = "fyl76qhrztcreto2vej7";
-constexpr char TOKEN_LED4[] = "zUvDq5FLsYePSqKWqurB";
-
-constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
-constexpr uint16_t THINGSBOARD_PORT = 1883;
-
-constexpr uint32_t MAX_MESSAGE_SIZE = 1024;
-constexpr uint16_t telemetrySendInterval = 2000;
-
-WiFiClient wifiClientSensor, wifiClientFan, wifiClientIR, wifiClientPIR, wifiClientLED4;
-Arduino_MQTT_Client mqttClientSensor(wifiClientSensor);
-Arduino_MQTT_Client mqttClientFan(wifiClientFan);
-Arduino_MQTT_Client mqttClientIR(wifiClientIR);
-Arduino_MQTT_Client mqttClientPIR(wifiClientPIR);
-Arduino_MQTT_Client mqttClientLED4(wifiClientLED4);
-ThingsBoard tbLED4(mqttClientLED4, MAX_MESSAGE_SIZE);
-ThingsBoard tbSensor(mqttClientSensor, MAX_MESSAGE_SIZE);
-ThingsBoard tbFan(mqttClientFan, MAX_MESSAGE_SIZE);
-ThingsBoard tbIR(mqttClientIR, MAX_MESSAGE_SIZE);
-ThingsBoard tbPIR(mqttClientPIR, MAX_MESSAGE_SIZE);
-
-// ========== OBJECTS ==========
-DHT20 dht20;
-Servo myServo;
-Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
-
-// ========== GLOBAL VARIABLES ==========
-int fanSpeed = 0;
-bool attributesSent = false;
-unsigned long lastSendTime = 0;
-unsigned long doorOpenTime = 0;
-bool isDoorOpen = false;
-float distance = 0;
-unsigned long duration;
-bool led4State = false; // false = tắt, true = bật
-bool led3State = false; // false = tắt, true = bật
-
-// ========== RPC: FAN ==========
-void processFanSpeedChange(JsonVariantConst const &request, JsonDocument &response)
+void callback(char *topic, byte *payload, unsigned int length)
 {
-  if (!request["speed"])
+  StaticJsonDocument<256> doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+  if (error)
   {
-    Serial.println("⚠️ Request không có trường 'speed'");
+    Serial.println("[MQTT] JSON parse failed");
     return;
   }
 
-  int speed = request["speed"].as<int>();
-  if (speed < 0 || speed > 100)
+  String method = doc["method"];
+  String topicStr = String(topic);
+  String requestId = topicStr.substring(strlen("v1/devices/me/rpc/request/"));
+  String responseTopic = "v1/devices/me/rpc/response/" + requestId;
+
+  if (method == "setLEDValue")
   {
-    Serial.println("⚠️ Giá trị speed ngoài phạm vi 0-100");
-    return;
+    bool newState = doc["params"].is<bool>() ? doc["params"].as<bool>() : doc["params"]["value"].as<bool>();
+
+    ledState = newState;
+    digitalWrite(LED1_PIN, ledState ? HIGH : LOW);
+    Serial.println("[RPC] LED: " + String(ledState ? "ON" : "OFF"));
+
+    String payload = "{\"value\":" + String(ledState ? 1 : 0) + "}";
+    mqttClient.publish(responseTopic.c_str(), payload.c_str());
   }
-
-  fanSpeed = speed;
-  int pwmValue = map(fanSpeed, 0, 100, 0, 255);
-  ledcWrite(FAN_PWM_CHANNEL, pwmValue);
-  Serial.printf("✅ Fan speed updated: %d%% (PWM: %d)\n", fanSpeed, pwmValue);
-
-  response["status"] = "ok";
-  response["fanSpeed"] = fanSpeed;
 }
 
-RPC_Callback fanSpeedCallback("fanSpeed", processFanSpeedChange);
-
-void processLED4Control(JsonVariantConst request, JsonDocument &response)
+void connectToWiFi()
 {
-  Serial.println("📥 Nhận RPC setLED4");
-
-  if (!request.is<JsonObjectConst>())
-  {
-    Serial.println("⚠️ RPC LED4 cần là object với trường 'setLED4'");
-    response["status"] = "error";
-    response["message"] = "Expected object with 'setLED4'.";
-    return;
-  }
-
-  if (!request.containsKey("setLED4"))
-  {
-    Serial.println("⚠️ RPC LED4 thiếu trường 'setLED4'");
-    response["status"] = "error";
-    response["message"] = "Missing field 'setLED4'.";
-    return;
-  }
-
-  led4State = request["setLED4"].as<bool>();
-
-  if (led4State)
-  {
-    strip.setPixelColor(3, strip.Color(255, 255, 255)); // Bật LED 4
-    strip.show();
-
-    Serial.println("💡 LED4: BẬT");
-  }
-  else
-  {
-    strip.setPixelColor(3, strip.Color(0, 0, 0)); // Tắt LED 4
-    strip.show();
-
-    Serial.println("💡 LED4: TẮT");
-  }
-
-  strip.show();
-
-  response["status"] = "ok";
-  response["setLED4"] = led4State;
-
-  // Gửi trạng thái LED4 về ThingsBoard như telemetry hoặc attribute (tùy bạn)
-  tbLED4.sendTelemetryData("led4State", led4State ? "ON" : "OFF");
-}
-
-RPC_Callback led4ControlCallback("setLED4", processLED4Control);
-
-void processLED3Control(JsonVariantConst request, JsonDocument &response)
-{
-  Serial.println("📥 Nhận RPC setLED3");
-
-  if (!request.is<JsonObjectConst>())
-  {
-    Serial.println("⚠️ RPC LED3 cần là object với trường 'setLED3'");
-    response["status"] = "error";
-    response["message"] = "Expected object with 'setLED3'.";
-    return;
-  }
-
-  if (!request.containsKey("setLED3"))
-  {
-    Serial.println("⚠️ RPC LED3 thiếu trường 'setLED3'");
-    response["status"] = "error";
-    response["message"] = "Missing field 'setLED3'.";
-    return;
-  }
-
-  led3State = request["setLED3"].as<bool>();
-
-  if (led3State)
-  {
-    strip.setPixelColor(2, strip.Color(255, 255, 255)); // Bật LED 3
-    Serial.println("💡 LED3: BẬT");
-  }
-  else
-  {
-    strip.setPixelColor(2, strip.Color(0, 0, 0)); // Tắt LED 3
-    Serial.println("💡 LED3: TẮT");
-  }
-
-  strip.show();
-
-  response["status"] = "ok";
-  response["setLED3"] = led3State;
-
-  // ✅ Gửi trạng thái LED3 về ThingsBoard thông qua tbIR
-  tbIR.sendTelemetryData("led3State", led3State ? "ON" : "OFF");
-}
-
-RPC_Callback led3ControlCallback("setLED3", processLED3Control);
-
-// ========== INIT ==========
-void InitWiFi()
-{
-  Serial.println("🔌 Connecting to WiFi...");
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED)
   {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\n✅ WiFi connected");
+  Serial.println("\n[WiFi] Connected. IP: " + WiFi.localIP().toString());
 }
 
-// ========== MQTT CONNECTION ==========
-void ConnectLED4MQTT()
+void reconnectMQTT()
 {
-  if (!tbLED4.connected())
+  while (!mqttClient.connected())
   {
-    Serial.println("🔌 Kết nối MQTT LED4...");
-    if (tbLED4.connect(THINGSBOARD_SERVER, TOKEN_LED4, THINGSBOARD_PORT))
+    Serial.print("[MQTT] Connecting...");
+    if (mqttClient.connect("ESP32Client", mqttUser, mqttPassword))
     {
-      Serial.println("✅ MQTT LED4 kết nối");
-      tbLED4.RPC_Subscribe(led4ControlCallback); // ✅ Only subscribe once after connection
+      Serial.println("Connected!");
+      mqttClient.subscribe("v1/devices/me/rpc/request/+");
     }
     else
     {
-      Serial.println("❌ Kết nối LED4 thất bại");
+      Serial.print("Failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" retrying in 5s...");
+      vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
   }
 }
 
-void ConnectSensorMQTT()
+void mqttTask(void *param)
 {
-  if (!tbSensor.connected())
-  {
-    Serial.println("🔌 Kết nối MQTT SENSOR...");
-    if (tbSensor.connect(THINGSBOARD_SERVER, TOKEN_SENSOR, THINGSBOARD_PORT))
-    {
-      Serial.println("✅ MQTT SENSOR kết nối");
+  mqttClient.setServer(mqttServer, mqttPort);
+  mqttClient.setCallback(callback);
 
-      if (!attributesSent)
-      {
-        tbSensor.sendAttributeData("macAddress", WiFi.macAddress().c_str());
-        tbSensor.sendAttributeData("ssid", WiFi.SSID().c_str());
-        tbSensor.sendAttributeData("localIp", WiFi.localIP().toString().c_str());
-        attributesSent = true;
-      }
-    }
-    else
+  for (;;)
+  {
+    if (!mqttClient.connected())
     {
-      Serial.println("❌ Kết nối SENSOR thất bại");
+      reconnectMQTT();
     }
+    mqttClient.loop();
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
-void ConnectFanMQTT()
-{
-  if (!tbFan.connected())
-  {
-    Serial.println("🔌 Kết nối MQTT FAN...");
-    if (tbFan.connect(THINGSBOARD_SERVER, TOKEN_FAN, THINGSBOARD_PORT))
-    {
-      Serial.println("✅ MQTT FAN kết nối");
-      tbFan.RPC_Subscribe(fanSpeedCallback);
-    }
-    else
-    {
-      Serial.println("❌ Kết nối FAN thất bại");
-    }
-  }
-}
-
-void ConnectIRMQTT()
-{
-  if (!tbIR.connected())
-  {
-    Serial.println("🔌 Kết nối MQTT IR...");
-    if (tbIR.connect(THINGSBOARD_SERVER, TOKEN_IR, THINGSBOARD_PORT))
-    {
-      Serial.println("✅ MQTT IR kết nối");
-      tbIR.RPC_Subscribe(led3ControlCallback); // ✅ Đăng ký RPC LED3 tại đây
-    }
-    else
-    {
-      Serial.println("❌ Kết nối IR thất bại");
-    }
-  }
-}
-
-void ConnectPIRMQTT()
-{
-  if (!tbPIR.connected())
-  {
-    Serial.println("🔌 Kết nối MQTT PIR...");
-    if (tbPIR.connect(THINGSBOARD_SERVER, TOKEN_PIR, THINGSBOARD_PORT))
-    {
-      Serial.println("✅ MQTT PIR kết nối");
-    }
-    else
-    {
-      Serial.println("❌ Kết nối PIR thất bại");
-    }
-  }
-}
-
-// ========== DOOR CONTROL ==========
-void openDoor()
-{
-  if (!isDoorOpen)
-  {
-    myServo.write(120);
-    isDoorOpen = true;
-    doorOpenTime = millis();
-    Serial.println("🚪 Mở cửa");
-  }
-}
-
-void updateDoor()
-{
-  if (isDoorOpen && (millis() - doorOpenTime >= 5000))
-  {
-    myServo.write(0);
-    isDoorOpen = false;
-    Serial.println("🚪 Đóng cửa");
-  }
-}
-
-// ========== SETUP ==========
 void setup()
 {
   Serial.begin(115200);
+  pinMode(LED1_PIN, OUTPUT);
+  digitalWrite(LED1_PIN, LOW);
 
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
+  connectToWiFi();
 
-  pinMode(PIR_PIN, INPUT);
-  pinMode(IR_PIN, INPUT);
-
-  strip.begin();
-  strip.show();
-
-  Wire.begin(SDA_PIN, SCL_PIN);
-  dht20.begin();
-
-  myServo.setPeriodHertz(50);
-  myServo.attach(SERVO_PIN, 544, 2400);
-  myServo.write(0);
-
-  ledcSetup(FAN_PWM_CHANNEL, 5000, 8);
-  ledcAttachPin(FAN, FAN_PWM_CHANNEL);
-  tbLED4.sendTelemetryData("led4State", led4State ? "ON" : "OFF");
-
-  InitWiFi();
+  xTaskCreatePinnedToCore(
+      mqttTask,
+      "MQTTTask",
+      4096,
+      NULL,
+      1,
+      NULL,
+      1);
 }
 
-// ========== LOOP ==========
 void loop()
 {
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    InitWiFi();
-    delay(5000);
-    return;
-  }
-
-  ConnectSensorMQTT();
-  ConnectFanMQTT();
-  ConnectIRMQTT();
-  ConnectPIRMQTT();
-  ConnectLED4MQTT();
-
-  if (millis() - lastSendTime >= telemetrySendInterval)
-  {
-    if (tbSensor.connected())
-    {
-      dht20.read();
-      float temperature = dht20.getTemperature();
-      float humidity = dht20.getHumidity();
-
-      if (!isnan(temperature) && !isnan(humidity))
-      {
-        // Gửi nhiệt độ và độ ẩm về ThingsBoard qua TOKEN_SENSOR
-        tbSensor.sendTelemetryData("temperature", temperature);
-        tbSensor.sendTelemetryData("humidity", humidity);
-
-        Serial.printf("🌡️ Temp: %.2f°C | 💧 Hum: %.2f%%\n", temperature, humidity);
-
-        // LED báo nhiệt độ
-        strip.setPixelColor(0, temperature > 30.0 ? strip.Color(255, 0, 0) : strip.Color(0, 0, 0));
-      }
-    }
-    else
-    {
-      Serial.println("⚠️ MQTT SENSOR chưa kết nối, bỏ qua gửi nhiệt độ/độ ẩm");
-    }
-
-    // Siêu âm
-    digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-
-    duration = pulseIn(ECHO_PIN, HIGH, 30000);
-    distance = duration * 0.034 / 2;
-    tbSensor.sendTelemetryData("distance", distance);
-    Serial.printf("📏 Distance: %.2f cm\n", distance);
-
-    if (distance > 0 && distance < 15)
-    {
-      Serial.println("🚶 Có người - mở cửa");
-      openDoor();
-    }
-
-    // PIR
-    bool motion = digitalRead(PIR_PIN) == HIGH;
-    Serial.println(String("👀 PIR phát hiện: ") + (motion ? "Yes" : "No"));
-    // Cập nhật màu LED
-    strip.setPixelColor(1, motion ? strip.Color(0, 255, 0) : strip.Color(0, 0, 0));
-    strip.show();
-    // Gửi dữ liệu về thiết bị PIR
-    tbPIR.sendTelemetryData("active", motion);
-    tbPIR.sendTelemetryData("pir_motion", motion ? "Yes" : "No");
-
-    // IR
-    bool isDark = digitalRead(IR_PIN) == LOW;
-    const char *lightStatus = isDark ? "Sáng" : "Tối";
-
-    tbIR.sendTelemetryData("ir_dark", lightStatus);
-    Serial.println(String("Đèn : ") + lightStatus);
-
-    strip.setPixelColor(2, isDark ? strip.Color(255, 255, 0) : strip.Color(0, 0, 0));
-
-    tbSensor.sendTelemetryData("rssi", WiFi.RSSI());
-    tbSensor.sendTelemetryData("fanSpeed", fanSpeed);
-
-    strip.show();
-    lastSendTime = millis();
-  }
-
-  updateDoor();
-
-  tbSensor.loop();
-  tbFan.loop();
-  tbIR.loop();
-  tbPIR.loop();
-  tbLED4.loop();
 }
