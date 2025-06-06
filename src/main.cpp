@@ -35,7 +35,7 @@ constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
 constexpr uint16_t THINGSBOARD_PORT = 1883;
 
 constexpr uint32_t MAX_MESSAGE_SIZE = 1024;
-constexpr uint16_t telemetrySendInterval = 2000;
+constexpr uint16_t telemetrySendInterval = 5000;
 
 WiFiClient wifiClientSensor, wifiClientFan, wifiClientPIR, wifiClientLED4;
 Arduino_MQTT_Client mqttClientSensor(wifiClientSensor);
@@ -69,6 +69,40 @@ bool sensorRPCSubscribed = false;
 bool fanRPCSubscribed = false;
 bool led4RPCSubscribed = false;
 
+// ========== SETUP ==========
+void turnoffAll()
+{
+  // Tắt tất cả LED
+  strip.setPixelColor(0, strip.Color(0, 0, 0));
+  strip.setPixelColor(1, strip.Color(0, 0, 0));
+  strip.setPixelColor(2, strip.Color(0, 0, 0));
+  strip.setPixelColor(3, strip.Color(0, 0, 0));
+  strip.show();
+
+  // Tắt quạt
+  ledcWrite(FAN_PWM_CHANNEL, 0);
+  fanSpeed = 0;
+
+  // Đóng cửa
+  myServo.write(0);
+  isDoorOpen = false;
+  controlDoorState = false;
+  Serial.println("🔌 Tất cả thiết bị đã được tắt.");
+}
+
+void onSharedAttributeStateAll(JsonVariantConst data)
+{
+  if (data.containsKey("StateAll"))
+  {
+    bool stateAll = data["StateAll"];
+    Serial.printf("Nhận shared attribute StateAll: %s\n", stateAll ? "true" : "false");
+    if (!stateAll)
+    {
+      turnoffAll();
+    }
+  }
+}
+
 // ========== RPC: FAN ==========
 void processFanSpeedChange(JsonVariantConst const &request, JsonDocument &response)
 {
@@ -96,45 +130,45 @@ void processFanSpeedChange(JsonVariantConst const &request, JsonDocument &respon
 
 RPC_Callback fanSpeedCallback("fanSpeed", processFanSpeedChange);
 
-// void processManualMode(JsonVariantConst request, JsonDocument &response)
-// {
-//   Serial.println("📥 Nhận RPC setState (Manual Mode)");
+void processManualMode(JsonVariantConst request, JsonDocument &response)
+{
+  Serial.println("📥 Nhận RPC setState (Manual Mode)");
 
-//   if (!request.containsKey("setState"))
-//   {
-//     Serial.println("⚠️ RPC thiếu trường 'setState'");
-//     response["status"] = "error";
-//     response["message"] = "Missing 'setState'";
-//     return;
-//   }
+  if (!request.containsKey("setState"))
+  {
+    Serial.println("⚠️ RPC thiếu trường 'setState'");
+    response["status"] = "error";
+    response["message"] = "Missing 'setState'";
+    return;
+  }
 
-//   manualMode = request["setState"].as<bool>();
-//   response["status"] = "ok";
-//   response["manualMode"] = manualMode;
+  manualMode = request["setState"].as<bool>();
+  response["status"] = "ok";
+  response["manualMode"] = manualMode;
 
-//   Serial.print("⚙️ Manual Mode: ");
-//   Serial.println(manualMode ? "BẬT" : "TẮT");
+  Serial.print("⚙️ Manual Mode: ");
+  Serial.println(manualMode ? "BẬT" : "TẮT");
 
-//   // Nếu bật chế độ manual: tắt đèn và đóng cửa ngay
-//   if (manualMode)
-//   {
-//     // Tắt LED
-//     strip.setPixelColor(0, strip.Color(0, 0, 0));
-//     strip.setPixelColor(1, strip.Color(0, 0, 0));
-//     strip.setPixelColor(2, strip.Color(0, 0, 0));
-//     strip.setPixelColor(3, strip.Color(0, 0, 0));
-//     strip.show();
+  // Nếu bật chế độ manual: tắt đèn và đóng cửa ngay
+  if (manualMode)
+  {
+    // Tắt LED
+    strip.setPixelColor(0, strip.Color(0, 0, 0));
+    strip.setPixelColor(1, strip.Color(0, 0, 0));
+    strip.setPixelColor(2, strip.Color(0, 0, 0));
+    strip.setPixelColor(3, strip.Color(0, 0, 0));
+    strip.show();
 
-//     // Đóng cửa nếu đang mở
-//     myServo.write(0);
-//     isDoorOpen = false;
-//     Serial.println("🚪 Cửa đã đóng (do Manual Mode)");
-//   }
+    // Đóng cửa nếu đang mở
+    myServo.write(0);
+    isDoorOpen = false;
+    Serial.println("🚪 Cửa đã đóng (do Manual Mode)");
+  }
 
-//   // Gửi trạng thái về ThingsBoard
-//   tbSensor.sendTelemetryData("manualMode", manualMode);
-// }
-// RPC_Callback manualModeCallback("setState", processManualMode);
+  // Gửi trạng thái về ThingsBoard
+  tbSensor.sendTelemetryData("manualMode", manualMode);
+}
+RPC_Callback manualModeCallback("setState", processManualMode);
 
 // ========== RPC: LED4 ==========
 void processLED4Control(JsonVariantConst request, JsonDocument &response)
@@ -207,24 +241,18 @@ void processLED3Control(JsonVariantConst request, JsonDocument &response)
 
   led3State = request["setLED3"].as<bool>();
 
+  if (manualMode == true)
+  {
 
-    if (!led3State)
-    {      strip.setPixelColor(2, strip.Color(0, 0, 0)); // Tắt LED 3
-      Serial.println("💡 LED3: TẮT");
-       strip.setPixelColor(0, strip.Color(0, 0, 0));
-    strip.setPixelColor(1, strip.Color(0, 0, 0));
-    strip.setPixelColor(2, strip.Color(0, 0, 0));
-          tbSensor.sendTelemetryData("ir_dark", "Tối");
-
+    if (led3State)
+    {
+      strip.setPixelColor(2, strip.Color(255, 255, 255)); // Bật LED 3
+      Serial.println("💡 LED3: BẬT");
     }
     else
     {
- strip.setPixelColor(2, strip.Color(255, 255, 255)); 
-     strip.setPixelColor(0, strip.Color(0, 0, 0));
-    strip.setPixelColor(1, strip.Color(0, 0, 0));
-    strip.setPixelColor(2, strip.Color(0, 0, 0));
-      Serial.println("💡 LED3: BẬT");
-
+      strip.setPixelColor(2, strip.Color(0, 0, 0)); // Tắt LED 3
+      Serial.println("💡 LED3: TẮT");
     }
 
     strip.show();
@@ -235,7 +263,7 @@ void processLED3Control(JsonVariantConst request, JsonDocument &response)
     // ✅ Gửi trạng thái LED3 về ThingsBoard thông qua tbIR
     tbSensor.sendTelemetryData("led3State", led3State ? "ON" : "OFF");
   }
-
+}
 
 RPC_Callback led3ControlCallback("setLED3", processLED3Control);
 
@@ -264,34 +292,35 @@ void processControlDoor(JsonVariantConst request, JsonDocument &response)
   // Lấy trạng thái điều khiển cửa từ RPC
   controlDoorState = request["controlDoor"].as<bool>();
 
-  
-    if (!controlDoorState)
-    { 
-      myServo.write(0); // Đóng cửa 
-      isDoorOpen = false;
-      Serial.println("🚪 Cửa: ĐÃ ĐÓNG (từ Dashboard - manual)");
-                tbPIR.sendTelemetryData("pir_motion", "Đóng");
-      
-    }
-    else
+  if (manualMode == true)
+  {
+    if (controlDoorState)
     {
-     myServo.write(120); // Mở cửa
+      myServo.write(120); // Mở cửa
       isDoorOpen = true;
       doorOpenTime = millis();
       Serial.println("🚪 Cửa: ĐANG MỞ (từ Dashboard - manual)");
-          tbPIR.sendTelemetryData("pir_motion", "Mở");
-
-
     }
-    strip.show();
+    else
+    {
+      myServo.write(0); // Đóng cửa
+      isDoorOpen = false;
+      Serial.println("🚪 Cửa: ĐÃ ĐÓNG (từ Dashboard - manual)");
+    }
 
     response["status"] = "ok";
     response["controlDoor"] = controlDoorState;
 
     // ✅ Gửi trạng thái cửa về ThingsBoard
-    tbSensor.sendTelemetryData("controlDoorState", controlDoorState ? "Mở" : "Đóng");
+    tbSensor.sendTelemetryData("doorState", controlDoorState ? "Mở" : "Đóng");
   }
-
+  else
+  {
+    Serial.println("❌ Không thể điều khiển cửa khi manualMode đang TẮT");
+    response["status"] = "rejected";
+    response["message"] = "Manual mode is OFF. Cannot control door.";
+  }
+}
 
 RPC_Callback controlDoorCallback("controlDoor", processControlDoor);
 
@@ -341,13 +370,10 @@ void ConnectSensorMQTT()
       Serial.println("✅ MQTT SENSOR kết nối");
 
       if (!sensorRPCSubscribed)
-      {      
-
-        tbSensor.RPC_Subscribe(controlDoorCallback);
-      
-
+      {
         tbSensor.RPC_Subscribe(led3ControlCallback);
-
+        tbSensor.RPC_Subscribe(manualModeCallback);
+        tbSensor.RPC_Subscribe(controlDoorCallback);
         sensorRPCSubscribed = true;
       }
 
@@ -407,6 +433,8 @@ void ConnectPIRMQTT()
 // ========== DOOR CONTROL ==========
 void handleDoor()
 {
+  if (manualMode)
+    return;
   // Nếu cửa đang đóng và có điều kiện mở (vd: distance gần)
   if (!isDoorOpen && distance > 0 && distance < 15)
   {
@@ -509,21 +537,21 @@ void loop()
     tbSensor.sendTelemetryData("distance", distance);
     Serial.printf("📏 Distance: %.2f cm\n", distance);
 
-    
-    
+    if (!manualMode)
+    {
       // ==== TỰ ĐỘNG MỞ CỬA ====
       if (distance > 0 && distance < 15)
       {
         Serial.println("🚶 Có người - mở cửa");
         handleDoor();
       }
-if (led3State){
 
       // ==== PIR ====
       bool motion = digitalRead(PIR_PIN) == HIGH;
       Serial.println(String("👀 PIR phát hiện: ") + (motion ? "Yes" : "No"));
       strip.setPixelColor(1, motion ? strip.Color(0, 255, 0) : strip.Color(0, 0, 0));
       tbPIR.sendTelemetryData("active", motion);
+
       // ==== IR ====
       bool isDark = digitalRead(IR_PIN) == LOW;
       strip.setPixelColor(2, isDark ? strip.Color(255, 255, 0) : strip.Color(0, 0, 0));
