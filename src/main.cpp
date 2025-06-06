@@ -35,7 +35,7 @@ constexpr char THINGSBOARD_SERVER[] = "app.coreiot.io";
 constexpr uint16_t THINGSBOARD_PORT = 1883;
 
 constexpr uint32_t MAX_MESSAGE_SIZE = 1024;
-constexpr uint16_t telemetrySendInterval = 2000;
+constexpr uint16_t telemetrySendInterval = 1000;
 
 WiFiClient wifiClientSensor, wifiClientFan, wifiClientPIR, wifiClientLED4;
 Arduino_MQTT_Client mqttClientSensor(wifiClientSensor);
