@@ -53,6 +53,7 @@ DHT20 dht20;
 Servo myServo;
 Adafruit_NeoPixel strip(NUM_LEDS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
+
 // ========== GLOBAL VARIABLES ==========
 int fanSpeed = 0;
 bool attributesSent = false;
@@ -68,7 +69,39 @@ bool controlDoorState = false; // false = đóng, true = mở
 bool sensorRPCSubscribed = false;
 bool fanRPCSubscribed = false;
 bool led4RPCSubscribed = false;
+// ========== SETUP ==========
+void turnoffAll()
+{
+  // Tắt tất cả LED
+  strip.setPixelColor(0, strip.Color(0, 0, 0));
+  strip.setPixelColor(1, strip.Color(0, 0, 0));
+  strip.setPixelColor(2, strip.Color(0, 0, 0));
+  strip.setPixelColor(3, strip.Color(0, 0, 0));
+  strip.show();
 
+  // Tắt quạt
+  ledcWrite(FAN_PWM_CHANNEL, 0);
+  fanSpeed = 0;
+
+  // Đóng cửa
+  myServo.write(0);
+  isDoorOpen = false;
+  controlDoorState = false;
+  Serial.println("🔌 Tất cả thiết bị đã được tắt.");
+}
+
+void onSharedAttributeStateAll(JsonVariantConst data)
+{
+  if (data.containsKey("StateAll"))
+  {
+    bool stateAll = data["StateAll"];
+    Serial.printf("Nhận shared attribute StateAll: %s\n", stateAll ? "true" : "false");
+    if (!stateAll)
+    {
+      turnoffAll();
+    }
+  }
+}
 // ========== RPC: FAN ==========
 void processFanSpeedChange(JsonVariantConst const &request, JsonDocument &response)
 {
@@ -95,46 +128,6 @@ void processFanSpeedChange(JsonVariantConst const &request, JsonDocument &respon
 }
 
 RPC_Callback fanSpeedCallback("fanSpeed", processFanSpeedChange);
-
-// void processManualMode(JsonVariantConst request, JsonDocument &response)
-// {
-//   Serial.println("📥 Nhận RPC setState (Manual Mode)");
-
-//   if (!request.containsKey("setState"))
-//   {
-//     Serial.println("⚠️ RPC thiếu trường 'setState'");
-//     response["status"] = "error";
-//     response["message"] = "Missing 'setState'";
-//     return;
-//   }
-
-//   manualMode = request["setState"].as<bool>();
-//   response["status"] = "ok";
-//   response["manualMode"] = manualMode;
-
-//   Serial.print("⚙️ Manual Mode: ");
-//   Serial.println(manualMode ? "BẬT" : "TẮT");
-
-//   // Nếu bật chế độ manual: tắt đèn và đóng cửa ngay
-//   if (manualMode)
-//   {
-//     // Tắt LED
-//     strip.setPixelColor(0, strip.Color(0, 0, 0));
-//     strip.setPixelColor(1, strip.Color(0, 0, 0));
-//     strip.setPixelColor(2, strip.Color(0, 0, 0));
-//     strip.setPixelColor(3, strip.Color(0, 0, 0));
-//     strip.show();
-
-//     // Đóng cửa nếu đang mở
-//     myServo.write(0);
-//     isDoorOpen = false;
-//     Serial.println("🚪 Cửa đã đóng (do Manual Mode)");
-//   }
-
-//   // Gửi trạng thái về ThingsBoard
-//   tbSensor.sendTelemetryData("manualMode", manualMode);
-// }
-// RPC_Callback manualModeCallback("setState", processManualMode);
 
 // ========== RPC: LED4 ==========
 void processLED4Control(JsonVariantConst request, JsonDocument &response)
